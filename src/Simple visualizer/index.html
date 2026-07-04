@@ -4,14 +4,25 @@
     <meta charset="utf-8">
     <title>Lines</title>
     <style media="screen">
-      body{
-        margin:0;
-        overflow:hidden;
+      body {
+        margin: 0;
+        overflow: hidden;
+      }
+      #hud {
+        position: fixed;
+        top: 8px;
+        left: 8px;
+        font: 11px/1 monospace;
+        color: rgba(255,255,255,0.5);
+        pointer-events: none;
+        user-select: none;
+        z-index: 9;
       }
     </style>
   </head>
   <body>
     <canvas id="canvas" width="300" height="300"></canvas>
+    <div id="hud">SRC: SYSTEM | silent: 0</div>
     <script src="viz.js" charset="utf-8"></script>
   </body>
 </html>
