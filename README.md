@@ -1,4 +1,4 @@
-# TThis is a Fork
+# This is a Fork
 A Fork with the Goal to accept/use the standard microphone-input as music-source!
 
 ---
