@@ -1,0 +1,30 @@
+name: Release folder ZIPs
+
+on:
+  release:
+    types: [published, prereleased]
+
+permissions:
+  contents: write
+
+jobs:
+  zip-src-folders:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build ZIPs
+        run: |
+          mkdir -p dist
+          shopt -s nullglob
+          for dir in src/*/; do
+            name="$(basename "$dir")"
+            (cd src && zip -r "../dist/${name}.zip" "$name")
+          done
+
+      - name: Upload assets to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
