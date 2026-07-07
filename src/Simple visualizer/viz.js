@@ -1,34 +1,47 @@
 /* ─── Simple Visualizer – viz.js ──────────────────────────────────────────
-   Dynamic source switching:
-   • Primary  → livelyAudioListener (Lively Wallpaper system-audio API)
-   • Fallback → microphone via Web Audio API / getUserMedia
-   Switching rules:
-     silence on system-audio for >= SILENCE_FRAMES_REQUIRED frames → activate mic
-     any non-silent frame from lively                              → deactivate mic
-   ─────────────────────────────────────────────────────────────────────────── */
+ Dynamic source switching:
+ • Primary  → livelyAudioListener (Lively Wallpaper system-audio API)
+ • Fallback → microphone via Web Audio API / getUserMedia
+ Switching rules:
+   silence on system-audio for >= SILENCE_FRAMES_REQUIRED frames → activate mic
+   any non-silent frame from lively                              → deactivate mic
 
+ Spectrum Analyzer mode:
+ • Frequency axis is logarithmic so that 1 kHz lands exactly in the centre
+ • Bars grow from the bottom up (classic spectrum analyser style)
+ • dB range: MIN_DB … 0 dB mapped to bar height
+ ─────────────────────────────────────────────────────────────────────────── */
 'use strict';
 
 // ── Canvas / render state ──────────────────────────────────────────────────
 const canvas = document.getElementById('canvas');
 const ctx    = canvas.getContext('2d');
 
-let max_height, startPos, vizWidth, midY, gradient;
+let canvasW, canvasH, max_height, gradient;
 let backgroundColor = 'rgb(0,0,0)';
 let linesColor      = 'rgb(255,0,0)';
-let square          = true;
+
+// ── Spectrum config ───────────────────────────────────────────────────────
+const SAMPLE_RATE   = 44100;          // assumed sample rate (Hz)
+const FFT_SIZE_MIC  = 2048;          // analyser fftSize for mic path
+const MIN_FREQ      = 20;            // Hz – left edge
+const MAX_FREQ      = 20000;         // Hz – right edge
+const CENTER_FREQ   = 1000;          // Hz – must land at canvas centre
+const MIN_DB        = -90;           // dB floor
+const MAX_DB        = 0;             // dB ceiling
+const BAR_GAP       = 1;             // px gap between bars
 
 // ── Switching / silence detection ─────────────────────────────────────────
-const SILENCE_THRESHOLD       = 0.01;  // bin value below which a frame counts as silent
-const SILENCE_FRAMES_REQUIRED = 45;   // ~1.5 s at 30 fps before mic kicks in
+const SILENCE_THRESHOLD      = 0.01;
+const SILENCE_FRAMES_REQUIRED = 45;
 
-let silentFrameCount  = 0;
-let micActive         = false;
-let micInitialized    = false;
-let micAnalyser       = null;
-let micDataArray      = null;
-let micAnimFrame      = null;
-let audioCtx          = null;
+let silentFrameCount = 0;
+let micActive        = false;
+let micInitialized   = false;
+let micAnalyser      = null;
+let micDataArray     = null;
+let micAnimFrame     = null;
+let audioCtx         = null;
 
 // ── HUD ───────────────────────────────────────────────────────────────────
 const hud = document.getElementById('hud');
@@ -43,13 +56,10 @@ function updateHUD() {
 function setSize() {
   canvas.width  = window.innerWidth;
   canvas.height = window.innerHeight;
-  max_height = window.innerHeight * 0.5;
-  startPos   = window.innerWidth  * 0.1;
-  vizWidth   = window.innerWidth  * 0.8;
-  midY       = canvas.height - canvas.height / 4;
-  gradient   = ctx.createLinearGradient(0, midY, 0, midY - max_height);
-  gradient.addColorStop(0, backgroundColor);
-  gradient.addColorStop(1, linesColor);
+  canvasW    = canvas.width;
+  canvasH    = canvas.height;
+  max_height = canvasH * 0.9;
+  _rebuildGradient();
 }
 window.onload  = setSize;
 window.onresize = setSize;
@@ -69,13 +79,11 @@ function livelyPropertyListener(name, val) {
       _rebuildGradient();
       break;
     }
-    case 'square':
-      square = val;
-      break;
   }
 }
 function _rebuildGradient() {
-  gradient = ctx.createLinearGradient(0, midY, 0, midY - max_height);
+  if (!canvasH) return;
+  gradient = ctx.createLinearGradient(0, canvasH, 0, canvasH - max_height);
   gradient.addColorStop(0, backgroundColor);
   gradient.addColorStop(1, linesColor);
 }
@@ -83,19 +91,16 @@ function _rebuildGradient() {
 // ── Core: Lively audio callback (system audio) ────────────────────────────
 function livelyAudioListener(audioArray) {
   const isSilent = _isSilentArray(audioArray);
-
   if (isSilent) {
     silentFrameCount = Math.min(silentFrameCount + 1, SILENCE_FRAMES_REQUIRED + 1);
     if (silentFrameCount >= SILENCE_FRAMES_REQUIRED && !micActive) {
       _activateMic();
     }
   } else {
-    // System audio has signal → be the authoritative source
     if (micActive) _deactivateMic();
     silentFrameCount = 0;
-    _renderFrame(audioArray);
+    _renderSpectrum(audioArray, SAMPLE_RATE / 2, audioArray.length);
   }
-
   updateHUD();
 }
 
@@ -111,20 +116,20 @@ function _isSilentArray(arr) {
 function _activateMic() {
   if (micActive) return;
   micActive = true;
-
   if (micInitialized && micAnalyser) {
     _startMicLoop();
     return;
   }
-
   navigator.mediaDevices.getUserMedia({ audio: true, video: false })
     .then(stream => {
-      audioCtx      = new (window.AudioContext || window.webkitAudioContext)();
-      const source  = audioCtx.createMediaStreamSource(stream);
-      micAnalyser   = audioCtx.createAnalyser();
-      micAnalyser.fftSize = 128;
+      audioCtx    = new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(stream);
+      micAnalyser  = audioCtx.createAnalyser();
+      micAnalyser.fftSize    = FFT_SIZE_MIC;
+      micAnalyser.minDecibels = MIN_DB;
+      micAnalyser.maxDecibels = MAX_DB;
       source.connect(micAnalyser);
-      micDataArray  = new Float32Array(micAnalyser.frequencyBinCount);
+      micDataArray   = new Float32Array(micAnalyser.frequencyBinCount);
       micInitialized = true;
       _startMicLoop();
     })
@@ -133,7 +138,6 @@ function _activateMic() {
       micActive = false;
     });
 }
-
 function _deactivateMic() {
   micActive = false;
   if (micAnimFrame) {
@@ -141,75 +145,94 @@ function _deactivateMic() {
     micAnimFrame = null;
   }
 }
-
 function _startMicLoop() {
+  const nyquist = audioCtx.sampleRate / 2;
+  const binCount = micAnalyser.frequencyBinCount;
   function tick() {
     if (!micActive) return;
     micAnalyser.getFloatFrequencyData(micDataArray);
-    // getFloatFrequencyData returns dB values (-Infinity … 0).
-    // Normalise to 0–1 range matching lively's audioArray format.
-    const normalised = _normaliseMicData(micDataArray);
-    _renderFrame(normalised);
+    _renderSpectrum(micDataArray, nyquist, binCount, true);
+    updateHUD();
     micAnimFrame = requestAnimationFrame(tick);
   }
   micAnimFrame = requestAnimationFrame(tick);
 }
 
-function _normaliseMicData(dbArray) {
-  const MIN_DB = -100;
-  const MAX_DB = -10;
-  const range  = MAX_DB - MIN_DB;
-  const out    = new Float32Array(dbArray.length);
-  for (let i = 0; i < dbArray.length; i++) {
-    out[i] = Math.max(0, Math.min(1, (dbArray[i] - MIN_DB) / range));
-  }
-  return out;
-}
+// ── Spectrum renderer ─────────────────────────────────────────────────────
+// audioArray : Float32Array – either 0-1 values (lively) or dB values (mic)
+// nyquist    : highest frequency represented (Hz)
+// binCount   : number of bins in audioArray
+// isDb       : true → values are dB, false → values are 0-1 linear
+function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
+  if (!canvasW) return;
 
-// ── Renderer ──────────────────────────────────────────────────────────────
-function _renderFrame(audioArray) {
-  let maxVal = 1;
-  for (const x of audioArray) {
-    if (x > maxVal) maxVal = x;
-  }
-
-  const offSet = vizWidth / audioArray.length;
-  const posLen = audioArray.length;
-
+  // Clear
   ctx.fillStyle = backgroundColor;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillRect(0, 0, canvasW, canvasH);
+
+  // ── Build logarithmic frequency mapping ──────────────────────────────
+  // We want MIN_FREQ on the left, MAX_FREQ on the right,
+  // with CENTER_FREQ exactly at canvasW/2.
+  //
+  // Use a two-segment log scale:
+  //   left half  : MIN_FREQ … CENTER_FREQ
+  //   right half : CENTER_FREQ … MAX_FREQ
+  const midX = canvasW / 2;
+
+  // Precompute how many display columns we draw
+  const numBars = Math.floor(canvasW / (1 + BAR_GAP));
 
   ctx.beginPath();
-  ctx.lineJoin = 'round';
-  ctx.moveTo(startPos - offSet * 3, midY);
-  ctx.lineTo(startPos, midY);
+  let firstBar = true;
 
-  let posInLine = -1;
-  for (let x = 0; x < posLen; x++) {
-    posInLine++;
-    ctx.lineTo(
-      startPos + offSet * posInLine,
-      midY - (audioArray[x] / maxVal) * max_height
-    );
-    if (square) {
-      ctx.lineTo(
-        startPos + offSet * (posInLine + 1),
-        midY - (audioArray[x] / maxVal) * max_height
-      );
+  for (let i = 0; i < numBars; i++) {
+    const px = i * (1 + BAR_GAP);
+
+    // Map pixel position → frequency (log scale, 1 kHz at centre)
+    let freq;
+    if (px <= midX) {
+      // left half: MIN_FREQ … CENTER_FREQ
+      const t = px / midX;  // 0 … 1
+      freq = MIN_FREQ * Math.pow(CENTER_FREQ / MIN_FREQ, t);
+    } else {
+      // right half: CENTER_FREQ … MAX_FREQ
+      const t = (px - midX) / midX;  // 0 … 1
+      freq = CENTER_FREQ * Math.pow(MAX_FREQ / CENTER_FREQ, t);
     }
+
+    // Map frequency → bin index
+    const binIndex = Math.min(
+      Math.round((freq / nyquist) * binCount),
+      binCount - 1
+    );
+
+    // Normalise value to 0-1
+    let norm;
+    if (isDb) {
+      norm = Math.max(0, Math.min(1,
+        (audioArray[binIndex] - MIN_DB) / (MAX_DB - MIN_DB)
+      ));
+    } else {
+      // lively gives 0-1; treat as linear amplitude → convert to pseudo-dB
+      const amp = Math.max(0, audioArray[binIndex]);
+      const db  = amp > 0 ? 20 * Math.log10(amp) : MIN_DB;
+      norm = Math.max(0, Math.min(1,
+        (db - MIN_DB) / (MAX_DB - MIN_DB)
+      ));
+    }
+
+    const barH = norm * max_height;
+    const y    = canvasH - barH;
+
+    if (firstBar) {
+      ctx.moveTo(px, canvasH);
+      firstBar = false;
+    }
+    ctx.rect(px, y, 1, barH);
   }
-  ctx.lineTo(startPos + offSet * (posInLine + (square ? 1 : 0)), midY);
-  ctx.lineTo(startPos + offSet * (posInLine + (square ? 4 : 3)), midY);
 
   ctx.fillStyle = gradient;
   ctx.fill();
-  _renderLine(linesColor);
-}
-
-function _renderLine(color) {
-  ctx.lineWidth   = 2;
-  ctx.strokeStyle = color;
-  ctx.stroke();
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────
@@ -222,13 +245,13 @@ function hexToRgb(hex) {
   } : null;
 }
 
-// ── Test-surface exports (stripped in production by checking env) ──────────
+// ── Test-surface exports ──────────────────────────────────────────────────
 /* istanbul ignore next */
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     _isSilentArray,
-    _normaliseMicData,
     livelyAudioListener,
-    _get: () => ({ silentFrameCount, micActive, SILENCE_THRESHOLD, SILENCE_FRAMES_REQUIRED })
+    _renderSpectrum,
+    _get: () => ({ silentFrameCount, micActive, SILENCE_THRESHOLD, SILENCE_FRAMES_REQUIRED }),
   };
 }
