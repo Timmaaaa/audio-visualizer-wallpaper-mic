@@ -1,4 +1,4 @@
-/* ─── Simple Visualizer – viz.js ──────────────────────────────────────────
+/* --- Simple Visualizer - viz.js ------------------------------------------
  Dynamic source switching:
    Primary  -> livelyAudioListener (Lively Wallpaper system-audio API)
    Fallback -> microphone via Web Audio API / getUserMedia
@@ -6,6 +6,8 @@
  Spectrum Analyzer:
    Log frequency axis, 1 kHz exactly at canvas centre
    Bars grow bottom-up, dB scale MIN_DB..0
+   Frequency legend labels at key frequencies
+   Peak-hold line per bar with configurable fall direction
    FIXES: setSize called immediately + clearRect + per-bar fillRect
 */
 'use strict';
@@ -26,6 +28,23 @@ const CENTER_FREQ   = 1000;
 const MIN_DB        = -90;
 const MAX_DB        = 0;
 const BAR_GAP       = 1;
+
+// -- Peak hold config -------------------------------------------------------
+const PEAK_HOLD_FRAMES  = 60;   // frames a peak stays before falling
+const PEAK_FALL_SPEED   = 0.008; // normalised units per frame (0-1)
+let   peakDirection     = 'down'; // 'down' or 'up' - set via livelyPropertyListener
+
+// per-bar peak state: { norm, holdFrames }
+let peakData = [];
+
+// -- Frequency legend markers -----------------------------------------------
+const LEGEND_FREQS = [
+  20, 60, 100, 150, 300, 500, 1000, 2000, 4000, 6000, 10000, 13000, 20000
+];
+const LEGEND_LABELS = [
+  '20Hz','60Hz','100Hz','150Hz','300Hz','500Hz',
+  '1kHz','2kHz','4kHz','6kHz','10kHz','13kHz','20kHz'
+];
 
 // -- Switching / silence detection ------------------------------------------
 const SILENCE_THRESHOLD       = 0.01;
@@ -53,7 +72,8 @@ function setSize() {
   canvas.height = window.innerHeight || 1080;
   canvasW    = canvas.width;
   canvasH    = canvas.height;
-  max_height = canvasH * 0.9;
+  max_height = canvasH * 0.85;
+  peakData   = []; // reset peaks on resize
   _rebuildGradient();
 }
 // Call immediately so canvasW/canvasH are never 0
@@ -76,6 +96,9 @@ function livelyPropertyListener(name, val) {
       _rebuildGradient();
       break;
     }
+    case 'peakDirection':
+      peakDirection = (val === 'up') ? 'up' : 'down';
+      break;
   }
 }
 function _rebuildGradient() {
@@ -146,6 +169,21 @@ function _startMicLoop() {
   micAnimFrame = requestAnimationFrame(tick);
 }
 
+// -- Frequency -> pixel X helper (log scale, 1kHz at centre) ----------------
+function _freqToX(freq) {
+  const midX = canvasW / 2;
+  if (freq <= CENTER_FREQ) {
+    return midX * Math.log(freq / MIN_FREQ) / Math.log(CENTER_FREQ / MIN_FREQ);
+  } else {
+    return midX + midX * Math.log(freq / CENTER_FREQ) / Math.log(MAX_FREQ / CENTER_FREQ);
+  }
+}
+
+// -- Spectrum renderer ------------------------------------------------------
+function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
+  if (!canvasW || !canvasH) { setSize(); }
+
+  // Clear
 // -- Spectrum renderer ------------------------------------------------------
 // audioArray : 0-1 linear (lively) OR dB floats (mic, isDb=true)
 // nyquist    : top frequency in Hz
@@ -161,11 +199,15 @@ function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
 
   if (!gradient) _rebuildGradient();
 
-  const midX    = canvasW / 2;
   const barW    = 1;
   const step    = barW + BAR_GAP;
   const numBars = Math.floor(canvasW / step);
+  const midX    = canvasW / 2;
 
+  // Ensure peakData array is sized correctly
+  while (peakData.length < numBars) peakData.push({ norm: 0, hold: 0 });
+
+  // -- Draw bars + update peaks -------------------------------------------
   for (let i = 0; i < numBars; i++) {
     const px = i * step;
 
@@ -179,8 +221,7 @@ function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
 
     // frequency -> bin index
     const binIndex = Math.min(
-      Math.round((freq / nyquist) * binCount),
-      binCount - 1
+      Math.round((freq / nyquist) * binCount), binCount - 1
     );
 
     // normalise to 0-1
@@ -197,7 +238,86 @@ function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
       ));
     }
 
+    // Draw bar
     const barH = norm * max_height;
+    if (barH >= 1) {
+      ctx.fillStyle = gradient;
+      ctx.fillRect(px, canvasH - barH, barW, barH);
+    }
+
+    // Update peak hold
+    const p = peakData[i];
+    if (norm >= p.norm) {
+      p.norm = norm;
+      p.hold = PEAK_HOLD_FRAMES;
+    } else {
+      if (p.hold > 0) {
+        p.hold--;
+      } else {
+        p.norm = Math.max(0, p.norm - PEAK_FALL_SPEED);
+      }
+    }
+  }
+
+  // -- Draw peak lines --------------------------------------------------------
+  ctx.lineWidth   = 1.5;
+  ctx.strokeStyle = linesColor;
+  for (let i = 0; i < numBars; i++) {
+    const px   = i * step;
+    const p    = peakData[i];
+    if (p.norm < 0.005) continue;
+    let peakY;
+    if (peakDirection === 'up') {
+      // bar grows up, peak line is above the bar top
+      peakY = canvasH - p.norm * max_height - 2;
+    } else {
+      // 'down': peak line floats below the bar top
+      peakY = canvasH - p.norm * max_height + 2;
+    }
+    ctx.beginPath();
+    ctx.moveTo(px, peakY);
+    ctx.lineTo(px + barW, peakY);
+    ctx.stroke();
+  }
+
+  // -- Draw frequency legend --------------------------------------------------
+  _drawLegend();
+}
+
+// -- Frequency legend -------------------------------------------------------
+function _drawLegend() {
+  const legendH    = canvasH * 0.06;  // bottom strip height
+  const textY      = canvasH - 6;
+  const tickBottom = canvasH;
+  const tickTop    = canvasH - legendH;
+
+  // Parse linesColor into rgba with opacity for legend elements
+  ctx.save();
+  ctx.globalAlpha = 0.55;
+  ctx.strokeStyle = linesColor;
+  ctx.fillStyle   = linesColor;
+  ctx.font        = 'bold ' + Math.max(9, Math.round(canvasH * 0.018)) + 'px monospace';
+  ctx.textAlign   = 'center';
+  ctx.lineWidth   = 1;
+
+  for (let k = 0; k < LEGEND_FREQS.length; k++) {
+    const freq  = LEGEND_FREQS[k];
+    const label = LEGEND_LABELS[k];
+    const x     = _freqToX(freq);
+
+    // vertical tick line from bottom up
+    ctx.beginPath();
+    ctx.moveTo(x, tickBottom);
+    ctx.lineTo(x, tickTop);
+    ctx.stroke();
+
+    // label above tick
+    ctx.globalAlpha = 0.85;
+    ctx.fillText(label, x, textY);
+    ctx.globalAlpha = 0.55;
+  }
+
+  ctx.restore();
     if (barH < 1) continue;
 
     // Draw each bar individually (fixes the single-path fill bug)
@@ -219,7 +339,11 @@ if (typeof module !== 'undefined' && module.exports) {
     _isSilentArray,
     livelyAudioListener,
     _renderSpectrum,
+    _freqToX,
     setSize,
-    _get: function() { return { silentFrameCount, micActive, SILENCE_THRESHOLD, SILENCE_FRAMES_REQUIRED }; },
+    _get: function() {
+      return { silentFrameCount, micActive, SILENCE_THRESHOLD,
+               SILENCE_FRAMES_REQUIRED, peakDirection };
+    },
   };
 }
