@@ -1,38 +1,34 @@
 /* ─── Simple Visualizer – viz.js ──────────────────────────────────────────
  Dynamic source switching:
- • Primary  → livelyAudioListener (Lively Wallpaper system-audio API)
- • Fallback → microphone via Web Audio API / getUserMedia
- Switching rules:
-   silence on system-audio for >= SILENCE_FRAMES_REQUIRED frames → activate mic
-   any non-silent frame from lively                              → deactivate mic
-
- Spectrum Analyzer mode:
- • Frequency axis is logarithmic so that 1 kHz lands exactly in the centre
- • Bars grow from the bottom up (classic spectrum analyser style)
- • dB range: MIN_DB … 0 dB mapped to bar height
- ─────────────────────────────────────────────────────────────────────────── */
+   Primary  -> livelyAudioListener (Lively Wallpaper system-audio API)
+   Fallback -> microphone via Web Audio API / getUserMedia
+ Switching: silence >= 45 frames -> mic ON | any signal -> mic OFF
+ Spectrum Analyzer:
+   Log frequency axis, 1 kHz exactly at canvas centre
+   Bars grow bottom-up, dB scale MIN_DB..0
+   FIXES: setSize called immediately + clearRect + per-bar fillRect
+*/
 'use strict';
 
-// ── Canvas / render state ──────────────────────────────────────────────────
+// -- Canvas / render state --------------------------------------------------
 const canvas = document.getElementById('canvas');
 const ctx    = canvas.getContext('2d');
 
-let canvasW, canvasH, max_height, gradient;
+let canvasW = 0, canvasH = 0, max_height = 0, gradient = null;
 let backgroundColor = 'rgb(0,0,0)';
 let linesColor      = 'rgb(255,0,0)';
 
-// ── Spectrum config ───────────────────────────────────────────────────────
-const SAMPLE_RATE   = 44100;          // assumed sample rate (Hz)
-const FFT_SIZE_MIC  = 2048;          // analyser fftSize for mic path
-const MIN_FREQ      = 20;            // Hz – left edge
-const MAX_FREQ      = 20000;         // Hz – right edge
-const CENTER_FREQ   = 1000;          // Hz – must land at canvas centre
-const MIN_DB        = -90;           // dB floor
-const MAX_DB        = 0;             // dB ceiling
-const BAR_GAP       = 1;             // px gap between bars
+// -- Spectrum config --------------------------------------------------------
+const FFT_SIZE_MIC  = 2048;
+const MIN_FREQ      = 20;
+const MAX_FREQ      = 20000;
+const CENTER_FREQ   = 1000;
+const MIN_DB        = -90;
+const MAX_DB        = 0;
+const BAR_GAP       = 1;
 
-// ── Switching / silence detection ─────────────────────────────────────────
-const SILENCE_THRESHOLD      = 0.01;
+// -- Switching / silence detection ------------------------------------------
+const SILENCE_THRESHOLD       = 0.01;
 const SILENCE_FRAMES_REQUIRED = 45;
 
 let silentFrameCount = 0;
@@ -43,39 +39,40 @@ let micDataArray     = null;
 let micAnimFrame     = null;
 let audioCtx         = null;
 
-// ── HUD ───────────────────────────────────────────────────────────────────
+// -- HUD --------------------------------------------------------------------
 const hud = document.getElementById('hud');
 function updateHUD() {
   if (!hud) return;
-  hud.textContent = micActive
-    ? `SRC: MIC  | silent: ${silentFrameCount}`
-    : `SRC: SYSTEM | silent: ${silentFrameCount}`;
+  hud.textContent = (micActive ? 'SRC: MIC' : 'SRC: SYSTEM') +
+    ' | silent: ' + silentFrameCount;
 }
 
-// ── Layout ────────────────────────────────────────────────────────────────
+// -- Layout -----------------------------------------------------------------
 function setSize() {
-  canvas.width  = window.innerWidth;
-  canvas.height = window.innerHeight;
+  canvas.width  = window.innerWidth  || 1920;
+  canvas.height = window.innerHeight || 1080;
   canvasW    = canvas.width;
   canvasH    = canvas.height;
   max_height = canvasH * 0.9;
   _rebuildGradient();
 }
-window.onload  = setSize;
+// Call immediately so canvasW/canvasH are never 0
+setSize();
+window.onload   = setSize;
 window.onresize = setSize;
 
-// ── Lively property bridge ────────────────────────────────────────────────
+// -- Lively property bridge -------------------------------------------------
 function livelyPropertyListener(name, val) {
   switch (name) {
     case 'lineColor': {
       const c = hexToRgb(val);
-      linesColor = `rgb(${c.r},${c.g},${c.b})`;
+      if (c) { linesColor = 'rgb(' + c.r + ',' + c.g + ',' + c.b + ')'; }
       _rebuildGradient();
       break;
     }
     case 'backgroundColor': {
       const c = hexToRgb(val);
-      backgroundColor = `rgb(${c.r},${c.g},${c.b})`;
+      if (c) { backgroundColor = 'rgb(' + c.r + ',' + c.g + ',' + c.b + ')'; }
       _rebuildGradient();
       break;
     }
@@ -84,27 +81,24 @@ function livelyPropertyListener(name, val) {
 function _rebuildGradient() {
   if (!canvasH) return;
   gradient = ctx.createLinearGradient(0, canvasH, 0, canvasH - max_height);
-  gradient.addColorStop(0, backgroundColor);
-  gradient.addColorStop(1, linesColor);
+  gradient.addColorStop(0, linesColor);        // bottom: bar colour
+  gradient.addColorStop(1, backgroundColor);   // top: fade to bg
 }
 
-// ── Core: Lively audio callback (system audio) ────────────────────────────
+// -- Core: Lively audio callback (system audio) -----------------------------
 function livelyAudioListener(audioArray) {
-  const isSilent = _isSilentArray(audioArray);
-  if (isSilent) {
+  if (_isSilentArray(audioArray)) {
     silentFrameCount = Math.min(silentFrameCount + 1, SILENCE_FRAMES_REQUIRED + 1);
-    if (silentFrameCount >= SILENCE_FRAMES_REQUIRED && !micActive) {
-      _activateMic();
-    }
+    if (silentFrameCount >= SILENCE_FRAMES_REQUIRED && !micActive) _activateMic();
   } else {
     if (micActive) _deactivateMic();
     silentFrameCount = 0;
-    _renderSpectrum(audioArray, SAMPLE_RATE / 2, audioArray.length);
+    _renderSpectrum(audioArray, 22050, audioArray.length, false);
   }
   updateHUD();
 }
 
-// ── Silence detection helper ──────────────────────────────────────────────
+// -- Silence detection ------------------------------------------------------
 function _isSilentArray(arr) {
   for (let i = 0; i < arr.length; i++) {
     if (arr[i] > SILENCE_THRESHOLD) return false;
@@ -112,41 +106,35 @@ function _isSilentArray(arr) {
   return true;
 }
 
-// ── Mic management ────────────────────────────────────────────────────────
+// -- Mic management ---------------------------------------------------------
 function _activateMic() {
   if (micActive) return;
   micActive = true;
-  if (micInitialized && micAnalyser) {
-    _startMicLoop();
-    return;
-  }
+  if (micInitialized && micAnalyser) { _startMicLoop(); return; }
   navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-    .then(stream => {
-      audioCtx    = new (window.AudioContext || window.webkitAudioContext)();
-      const source = audioCtx.createMediaStreamSource(stream);
-      micAnalyser  = audioCtx.createAnalyser();
-      micAnalyser.fftSize    = FFT_SIZE_MIC;
-      micAnalyser.minDecibels = MIN_DB;
-      micAnalyser.maxDecibels = MAX_DB;
+    .then(function(stream) {
+      audioCtx           = new (window.AudioContext || window.webkitAudioContext)();
+      const source       = audioCtx.createMediaStreamSource(stream);
+      micAnalyser        = audioCtx.createAnalyser();
+      micAnalyser.fftSize      = FFT_SIZE_MIC;
+      micAnalyser.minDecibels  = MIN_DB;
+      micAnalyser.maxDecibels  = MAX_DB;
       source.connect(micAnalyser);
       micDataArray   = new Float32Array(micAnalyser.frequencyBinCount);
       micInitialized = true;
       _startMicLoop();
     })
-    .catch(err => {
-      console.warn('[viz] Mic access denied or unavailable:', err);
+    .catch(function(err) {
+      console.warn('[viz] Mic unavailable:', err);
       micActive = false;
     });
 }
 function _deactivateMic() {
   micActive = false;
-  if (micAnimFrame) {
-    cancelAnimationFrame(micAnimFrame);
-    micAnimFrame = null;
-  }
+  if (micAnimFrame) { cancelAnimationFrame(micAnimFrame); micAnimFrame = null; }
 }
 function _startMicLoop() {
-  const nyquist = audioCtx.sampleRate / 2;
+  const nyquist  = audioCtx.sampleRate / 2;
   const binCount = micAnalyser.frequencyBinCount;
   function tick() {
     if (!micActive) return;
@@ -158,62 +146,50 @@ function _startMicLoop() {
   micAnimFrame = requestAnimationFrame(tick);
 }
 
-// ── Spectrum renderer ─────────────────────────────────────────────────────
-// audioArray : Float32Array – either 0-1 values (lively) or dB values (mic)
-// nyquist    : highest frequency represented (Hz)
-// binCount   : number of bins in audioArray
-// isDb       : true → values are dB, false → values are 0-1 linear
+// -- Spectrum renderer ------------------------------------------------------
+// audioArray : 0-1 linear (lively) OR dB floats (mic, isDb=true)
+// nyquist    : top frequency in Hz
+// binCount   : length of audioArray
+// isDb       : true = values are dB, false = 0-1 linear
 function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
-  if (!canvasW) return;
+  if (!canvasW || !canvasH) { setSize(); }
 
-  // Clear
+  // Clear background
+  ctx.clearRect(0, 0, canvasW, canvasH);
   ctx.fillStyle = backgroundColor;
   ctx.fillRect(0, 0, canvasW, canvasH);
 
-  // ── Build logarithmic frequency mapping ──────────────────────────────
-  // We want MIN_FREQ on the left, MAX_FREQ on the right,
-  // with CENTER_FREQ exactly at canvasW/2.
-  //
-  // Use a two-segment log scale:
-  //   left half  : MIN_FREQ … CENTER_FREQ
-  //   right half : CENTER_FREQ … MAX_FREQ
-  const midX = canvasW / 2;
+  if (!gradient) _rebuildGradient();
 
-  // Precompute how many display columns we draw
-  const numBars = Math.floor(canvasW / (1 + BAR_GAP));
-
-  ctx.beginPath();
-  let firstBar = true;
+  const midX    = canvasW / 2;
+  const barW    = 1;
+  const step    = barW + BAR_GAP;
+  const numBars = Math.floor(canvasW / step);
 
   for (let i = 0; i < numBars; i++) {
-    const px = i * (1 + BAR_GAP);
+    const px = i * step;
 
-    // Map pixel position → frequency (log scale, 1 kHz at centre)
+    // pixel -> frequency (two-segment log, 1kHz at centre)
     let freq;
     if (px <= midX) {
-      // left half: MIN_FREQ … CENTER_FREQ
-      const t = px / midX;  // 0 … 1
-      freq = MIN_FREQ * Math.pow(CENTER_FREQ / MIN_FREQ, t);
+      freq = MIN_FREQ * Math.pow(CENTER_FREQ / MIN_FREQ, px / midX);
     } else {
-      // right half: CENTER_FREQ … MAX_FREQ
-      const t = (px - midX) / midX;  // 0 … 1
-      freq = CENTER_FREQ * Math.pow(MAX_FREQ / CENTER_FREQ, t);
+      freq = CENTER_FREQ * Math.pow(MAX_FREQ / CENTER_FREQ, (px - midX) / midX);
     }
 
-    // Map frequency → bin index
+    // frequency -> bin index
     const binIndex = Math.min(
       Math.round((freq / nyquist) * binCount),
       binCount - 1
     );
 
-    // Normalise value to 0-1
+    // normalise to 0-1
     let norm;
     if (isDb) {
       norm = Math.max(0, Math.min(1,
         (audioArray[binIndex] - MIN_DB) / (MAX_DB - MIN_DB)
       ));
     } else {
-      // lively gives 0-1; treat as linear amplitude → convert to pseudo-dB
       const amp = Math.max(0, audioArray[binIndex]);
       const db  = amp > 0 ? 20 * Math.log10(amp) : MIN_DB;
       norm = Math.max(0, Math.min(1,
@@ -222,36 +198,28 @@ function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
     }
 
     const barH = norm * max_height;
-    const y    = canvasH - barH;
+    if (barH < 1) continue;
 
-    if (firstBar) {
-      ctx.moveTo(px, canvasH);
-      firstBar = false;
-    }
-    ctx.rect(px, y, 1, barH);
+    // Draw each bar individually (fixes the single-path fill bug)
+    ctx.fillStyle = gradient;
+    ctx.fillRect(px, canvasH - barH, barW, barH);
   }
-
-  ctx.fillStyle = gradient;
-  ctx.fill();
 }
 
-// ── Utility ───────────────────────────────────────────────────────────────
+// -- Utility ----------------------------------------------------------------
 function hexToRgb(hex) {
-  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
-  return result ? {
-    r: parseInt(result[1], 16),
-    g: parseInt(result[2], 16),
-    b: parseInt(result[3], 16)
-  } : null;
+  const r = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  return r ? { r: parseInt(r[1],16), g: parseInt(r[2],16), b: parseInt(r[3],16) } : null;
 }
 
-// ── Test-surface exports ──────────────────────────────────────────────────
+// -- Test-surface exports ---------------------------------------------------
 /* istanbul ignore next */
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     _isSilentArray,
     livelyAudioListener,
     _renderSpectrum,
-    _get: () => ({ silentFrameCount, micActive, SILENCE_THRESHOLD, SILENCE_FRAMES_REQUIRED }),
+    setSize,
+    _get: function() { return { silentFrameCount, micActive, SILENCE_THRESHOLD, SILENCE_FRAMES_REQUIRED }; },
   };
 }
