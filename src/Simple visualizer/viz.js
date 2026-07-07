@@ -8,6 +8,7 @@
    Bars grow bottom-up, dB scale MIN_DB..0
    Frequency legend labels at key frequencies
    Peak-hold line per bar with configurable fall direction
+   FIXES: setSize called immediately + clearRect + per-bar fillRect
 */
 'use strict';
 
@@ -75,6 +76,7 @@ function setSize() {
   peakData   = []; // reset peaks on resize
   _rebuildGradient();
 }
+// Call immediately so canvasW/canvasH are never 0
 setSize();
 window.onload   = setSize;
 window.onresize = setSize;
@@ -102,11 +104,11 @@ function livelyPropertyListener(name, val) {
 function _rebuildGradient() {
   if (!canvasH) return;
   gradient = ctx.createLinearGradient(0, canvasH, 0, canvasH - max_height);
-  gradient.addColorStop(0, linesColor);
-  gradient.addColorStop(1, backgroundColor);
+  gradient.addColorStop(0, linesColor);        // bottom: bar colour
+  gradient.addColorStop(1, backgroundColor);   // top: fade to bg
 }
 
-// -- Core: Lively audio callback --------------------------------------------
+// -- Core: Lively audio callback (system audio) -----------------------------
 function livelyAudioListener(audioArray) {
   if (_isSilentArray(audioArray)) {
     silentFrameCount = Math.min(silentFrameCount + 1, SILENCE_FRAMES_REQUIRED + 1);
@@ -182,6 +184,15 @@ function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
   if (!canvasW || !canvasH) { setSize(); }
 
   // Clear
+// -- Spectrum renderer ------------------------------------------------------
+// audioArray : 0-1 linear (lively) OR dB floats (mic, isDb=true)
+// nyquist    : top frequency in Hz
+// binCount   : length of audioArray
+// isDb       : true = values are dB, false = 0-1 linear
+function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
+  if (!canvasW || !canvasH) { setSize(); }
+
+  // Clear background
   ctx.clearRect(0, 0, canvasW, canvasH);
   ctx.fillStyle = backgroundColor;
   ctx.fillRect(0, 0, canvasW, canvasH);
@@ -200,7 +211,7 @@ function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
   for (let i = 0; i < numBars; i++) {
     const px = i * step;
 
-    // pixel -> frequency
+    // pixel -> frequency (two-segment log, 1kHz at centre)
     let freq;
     if (px <= midX) {
       freq = MIN_FREQ * Math.pow(CENTER_FREQ / MIN_FREQ, px / midX);
@@ -208,7 +219,7 @@ function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
       freq = CENTER_FREQ * Math.pow(MAX_FREQ / CENTER_FREQ, (px - midX) / midX);
     }
 
-    // frequency -> bin
+    // frequency -> bin index
     const binIndex = Math.min(
       Math.round((freq / nyquist) * binCount), binCount - 1
     );
@@ -307,6 +318,12 @@ function _drawLegend() {
   }
 
   ctx.restore();
+    if (barH < 1) continue;
+
+    // Draw each bar individually (fixes the single-path fill bug)
+    ctx.fillStyle = gradient;
+    ctx.fillRect(px, canvasH - barH, barW, barH);
+  }
 }
 
 // -- Utility ----------------------------------------------------------------
