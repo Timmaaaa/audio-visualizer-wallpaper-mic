@@ -97,7 +97,7 @@ function livelyPropertyListener(name, val) {
       break;
     }
     case 'peakDirection':
-      peakDirection = (val === 'up') ? 'up' : 'down';
+      peakDirection = (val === 1) ? 'up' : 'down';
       break;
     case 'square':
       squareMode = !!val;
@@ -230,15 +230,15 @@ function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
     }
 
     let barH = norm * max_height;
-    if (squareMode) {
+    if (squareMode) {       ctx.beginPath();
       const quantized = Math.max(0, Math.floor(barH / step));
       barH = quantized * step;
     }
     if (barH < 1) continue;
     ctx.fillStyle = gradient;
-    if (squareMode) {
+    if (squareMode) {       ctx.beginPath();
       for (let y = canvasH - step; y >= canvasH - barH; y -= step) {
-        ctx.fillRect(px, y, barW, barW);
+        ctx.rect(px, y, barW, barW);
       }
     } else {
       ctx.fillRect(px, canvasH - barH, barW, barH);
