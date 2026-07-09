@@ -17,7 +17,7 @@
   "peakDirection": {
     "text": "Peak direction",
     "type": "dropdown",
-    "value": "down",
+        "value": 0,
     "items": ["down", "up"]
   }
 }
