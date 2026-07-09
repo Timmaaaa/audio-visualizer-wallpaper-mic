@@ -19,6 +19,7 @@ const ctx    = canvas.getContext('2d');
 let canvasW = 0, canvasH = 0, max_height = 0, gradient = null;
 let backgroundColor = 'rgb(0,0,0)';
 let linesColor      = 'rgb(255,0,0)';
+let squareMode      = true;
 
 // -- Spectrum config --------------------------------------------------------
 const FFT_SIZE_MIC  = 2048;
@@ -97,6 +98,9 @@ function livelyPropertyListener(name, val) {
     }
     case 'peakDirection':
       peakDirection = (val === 'up') ? 'up' : 'down';
+      break;
+    case 'square':
+      squareMode = !!val;
       break;
   }
 }
@@ -225,10 +229,20 @@ function _renderSpectrum(audioArray, nyquist, binCount, isDb) {
       ));
     }
 
-    const barH = norm * max_height;
+    let barH = norm * max_height;
+    if (squareMode) {
+      const quantized = Math.max(0, Math.floor(barH / step));
+      barH = quantized * step;
+    }
     if (barH < 1) continue;
     ctx.fillStyle = gradient;
-    ctx.fillRect(px, canvasH - barH, barW, barH);
+    if (squareMode) {
+      for (let y = canvasH - step; y >= canvasH - barH; y -= step) {
+        ctx.fillRect(px, y, barW, barW);
+      }
+    } else {
+      ctx.fillRect(px, canvasH - barH, barW, barH);
+    }
 
     const p = peakData[i];
     if (norm >= p.norm) {
@@ -313,7 +327,7 @@ if (typeof module !== 'undefined' && module.exports) {
     setSize,
     _get: function() {
       return { silentFrameCount, micActive, SILENCE_THRESHOLD,
-               SILENCE_FRAMES_REQUIRED, peakDirection };
+               SILENCE_FRAMES_REQUIRED, peakDirection, squareMode };
     },
   };
 }

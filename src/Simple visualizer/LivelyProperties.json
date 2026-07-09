@@ -13,5 +13,11 @@
     "type": "checkbox",
     "value": true,
     "text": "Square"
+  },
+  "peakDirection": {
+    "text": "Peak direction",
+    "type": "dropdown",
+    "value": "down",
+    "items": ["down", "up"]
   }
 }
